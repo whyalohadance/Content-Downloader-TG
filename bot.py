@@ -6,6 +6,8 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 import aiohttp
 import json
 from urllib.parse import quote, urlparse
+from pytubefix import YouTube
+from pytubefix.cli import on_progress
 
 # Вставь сюда токен от @BotFather
 BOT_TOKEN = "8410013565:AAHNYF-9HE7z7KMKxqeI_ZuMjK-W84J_0Rs"
@@ -108,127 +110,87 @@ def detect_platform(text):
     
     return None
 
-async def download_youtube(url):
-    """Скачивает видео с YouTube через API"""
+def download_youtube_sync(url):
+    """Синхронная функция для скачивания YouTube через pytubefix"""
     try:
         print(f"📺 YouTube URL: {url}")
         
-        # Используем бесплатный API для YouTube
-        # Вариант 1: cobalt.tools API (бесплатный, без ключа)
-        api_url = "https://api.cobalt.tools/api/json"
+        # Создаем объект YouTube
+        yt = YouTube(url, on_progress_callback=on_progress)
         
-        payload = {
-            "url": url,
-            "vQuality": "1080",  # Максимальное качество до 1080p
-            "filenamePattern": "basic",
-            "isAudioOnly": False
+        title = yt.title
+        duration = yt.length
+        video_id = yt.video_id
+        
+        print(f"📺 Title: {title}")
+        print(f"⏱ Duration: {duration}s ({duration // 60}m {duration % 60}s)")
+        
+        # Проверяем длительность
+        if duration > 1200:  # 20 минут
+            print(f"⚠️ Video too long: {duration}s")
+            return {
+                "type": "error",
+                "message": f"❌ Видео слишком длинное: {duration // 60} мин {duration % 60} сек\n\nTelegram поддерживает до 20 минут"
+            }
+        
+        # Получаем лучший поток с видео и аудио (progressive)
+        # Или отдельно видео и аудио если progressive недоступен
+        print("⬇️ Downloading...")
+        
+        # Пробуем progressive stream (видео+аудио в одном файле)
+        stream = yt.streams.filter(progressive=True, file_extension='mp4').order_by('resolution').desc().first()
+        
+        if not stream:
+            # Если progressive нет, берем только видео (без звука, но хорошее качество)
+            stream = yt.streams.filter(adaptive=True, file_extension='mp4', only_video=False).order_by('resolution').desc().first()
+        
+        if not stream:
+            print("❌ No suitable stream found")
+            return {
+                "type": "error",
+                "message": "❌ Не удалось найти подходящий формат видео"
+            }
+        
+        print(f"📥 Downloading: {stream.resolution} - {stream.filesize / (1024*1024):.1f} MB")
+        
+        # Проверяем размер до скачивания
+        size_mb = stream.filesize / (1024 * 1024)
+        if size_mb > 45:
+            return {
+                "type": "error",
+                "message": f"❌ Видео слишком большое: {size_mb:.1f} MB\n\nTelegram поддерживает до 50 MB\n\n💡 Попробуй более короткое видео"
+            }
+        
+        # Скачиваем
+        video_path = stream.download(output_path='/tmp', filename=f'{video_id}.mp4')
+        
+        print(f"✅ Downloaded: {size_mb:.2f} MB")
+        
+        return {
+            "type": "video",
+            "path": video_path,
+            "title": title,
+            "duration": duration,
+            "size_mb": size_mb,
+            "platform": "youtube"
         }
         
-        headers = {
-            "Accept": "application/json",
-            "Content-Type": "application/json"
-        }
-        
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                api_url,
-                json=payload,
-                headers=headers,
-                timeout=aiohttp.ClientTimeout(total=30)
-            ) as response:
-                if response.status == 200:
-                    result = await response.json()
-                    print(f"Cobalt Response: {json.dumps(result, indent=2)}")
-                    
-                    if result.get("status") == "success" or result.get("status") == "redirect":
-                        video_url = result.get("url")
-                        
-                        if video_url:
-                            # Получаем информацию о видео
-                            title = "YouTube Video"
-                            
-                            return {
-                                "type": "video",
-                                "url": video_url,
-                                "title": title,
-                                "platform": "youtube"
-                            }
-                
-                # Если Cobalt не сработал, пробуем альтернативный метод
-                print("⚠️ Cobalt failed, trying alternative...")
-                
-                # Вариант 2: y2mate API (альтернативный)
-                y2mate_url = "https://www.y2mate.com/mates/analyzeV2/ajax"
-                
-                video_id = None
-                if 'v=' in url:
-                    video_id = url.split('v=')[1].split('&')[0]
-                elif 'youtu.be/' in url:
-                    video_id = url.split('youtu.be/')[1].split('?')[0]
-                elif '/shorts/' in url:
-                    video_id = url.split('/shorts/')[1].split('?')[0]
-                
-                if video_id:
-                    y2mate_data = {
-                        "k_query": f"https://www.youtube.com/watch?v={video_id}",
-                        "k_page": "home",
-                        "hl": "en",
-                        "q_auto": 0
-                    }
-                    
-                    async with session.post(
-                        y2mate_url,
-                        data=y2mate_data,
-                        timeout=aiohttp.ClientTimeout(total=30)
-                    ) as y2mate_response:
-                        if y2mate_response.status == 200:
-                            y2mate_result = await y2mate_response.json()
-                            
-                            if y2mate_result.get("status") == "ok":
-                                title = y2mate_result.get("title", "YouTube Video")
-                                
-                                # Ищем лучшее качество видео
-                                links = y2mate_result.get("links", {}).get("mp4", {})
-                                
-                                # Приоритет качества: 1080p > 720p > 480p > 360p
-                                for quality in ["1080", "720", "480", "360"]:
-                                    if quality in links:
-                                        k_value = links[quality].get("k")
-                                        
-                                        if k_value:
-                                            # Получаем прямую ссылку на скачивание
-                                            convert_url = "https://www.y2mate.com/mates/convertV2/index"
-                                            convert_data = {
-                                                "vid": video_id,
-                                                "k": k_value
-                                            }
-                                            
-                                            async with session.post(
-                                                convert_url,
-                                                data=convert_data,
-                                                timeout=aiohttp.ClientTimeout(total=30)
-                                            ) as convert_response:
-                                                if convert_response.status == 200:
-                                                    convert_result = await convert_response.json()
-                                                    
-                                                    if convert_result.get("status") == "ok":
-                                                        download_url = convert_result.get("dlink")
-                                                        
-                                                        if download_url:
-                                                            return {
-                                                                "type": "video",
-                                                                "url": download_url,
-                                                                "title": title,
-                                                                "quality": quality,
-                                                                "platform": "youtube"
-                                                            }
-                
-                print("❌ All YouTube download methods failed")
-                return None
-                
     except Exception as e:
-        print(f"YouTube Error: {type(e).__name__} - {str(e)}")
-        return None
+        error_msg = str(e)
+        print(f"YouTube Error: {type(e).__name__} - {error_msg}")
+        
+        if "Video unavailable" in error_msg or "Private video" in error_msg:
+            return {
+                "type": "error",
+                "message": "❌ Видео недоступно\n\nВозможные причины:\n• Видео приватное\n• Видео удалено\n• Географические ограничения"
+            }
+        
+        return {
+            "type": "error",
+            "message": f"❌ Ошибка загрузки: {type(e).__name__}"
+        }
+
+async def send_music(update: Update, result: dict):
     """Отправляет музыку из TikTok видео с кнопками поиска и Shazam распознаванием"""
     try:
         music_info = result.get("music_info")
@@ -247,7 +209,6 @@ async def download_youtube(url):
         
         print(f"🎵 Extracting music: {music_title} - {music_author} (original: {is_original})")
         
-        # Скачиваем аудио
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
             'Referer': 'https://www.tiktok.com/'
@@ -271,13 +232,10 @@ async def download_youtube(url):
         if not audio_data:
             return
         
-        # Распознаем трек через Shazam API только если это не оригинальный звук
         shazam_result = None
         
-        # Всегда пытаемся распознать, кроме явных "original sound"
         should_recognize = True
         if is_original and "original sound" in music_title.lower():
-            # Проверяем, может быть это известный трек с пометкой "original sound"
             if " - " in music_title and len(music_title.split(" - ")[1]) > 3:
                 should_recognize = True
             else:
@@ -287,7 +245,6 @@ async def download_youtube(url):
         if should_recognize:
             shazam_result = await recognize_with_shazam(audio_data)
         
-        # Определяем финальное название трека
         if shazam_result and shazam_result.get("recognized"):
             final_title = shazam_result.get("title", music_title)
             final_artist = shazam_result.get("artist", music_author)
@@ -297,13 +254,11 @@ async def download_youtube(url):
             apple_music_url = shazam_result.get("apple_music_url")
             youtube_url = shazam_result.get("youtube_url")
         else:
-            # Пытаемся извлечь информацию из названия трека
             clean_title = music_title.replace("original sound - ", "").strip()
             
             final_title = clean_title
             final_artist = "Unknown Artist"
             
-            # Попытка 1: "Artist - Song"
             if " - " in clean_title or " — " in clean_title:
                 separator = " - " if " - " in clean_title else " — "
                 parts = clean_title.split(separator, 1)
@@ -311,7 +266,6 @@ async def download_youtube(url):
                     if not parts[0].strip().startswith("@"):
                         final_artist = parts[0].strip()
                         final_title = parts[1].strip()
-            # Попытка 2: "Song (Artist)"
             elif "(" in clean_title and ")" in clean_title:
                 regex_pattern = r'^(.+?)\s*\((.+?)\)$'
                 match = re.match(regex_pattern, clean_title)
@@ -320,14 +274,12 @@ async def download_youtube(url):
                     potential_artist = match.group(2).strip()
                     if not potential_artist.startswith("@"):
                         final_artist = potential_artist
-            # Попытка 3: "Song | Artist"
             elif " | " in clean_title:
                 parts = clean_title.split(" | ", 1)
                 if len(parts) == 2 and not parts[1].strip().startswith("@"):
                     final_title = parts[0].strip()
                     final_artist = parts[1].strip()
             
-            # Если так и не нашли исполнителя
             if final_artist == "Unknown Artist" and music_author:
                 if not music_author.startswith("@"):
                     final_artist = music_author
@@ -341,7 +293,6 @@ async def download_youtube(url):
             apple_music_url = None
             youtube_url = None
         
-        # Создаем кнопки для поиска трека
         if final_artist and not final_artist.startswith("@") and final_artist != "Unknown Artist":
             search_query = f"{final_artist} {final_title}"
         else:
@@ -351,7 +302,6 @@ async def download_youtube(url):
         
         keyboard = []
         
-        # Первая строка
         row1 = []
         if spotify_url:
             row1.append(InlineKeyboardButton("🎵 Открыть в Spotify", url=spotify_url))
@@ -365,7 +315,6 @@ async def download_youtube(url):
         
         keyboard.append(row1)
         
-        # Вторая строка
         row2 = []
         if youtube_url:
             row2.append(InlineKeyboardButton("📺 Открыть в YouTube", url=youtube_url))
@@ -378,19 +327,16 @@ async def download_youtube(url):
         
         reply_markup = InlineKeyboardMarkup(keyboard)
         
-        # Формируем подпись
         caption = f"{shazam_status}\n\n"
         if final_artist and not final_artist.startswith("@") and final_artist != "Unknown Artist":
             caption += f"🎤 {final_artist}\n"
         caption += f"🎼 {final_title}\n\n"
         caption += "👇 Слушать полный трек:"
         
-        # Определяем performer для метаданных аудио
         audio_performer = final_artist
         if not final_artist or final_artist.startswith("@") or final_artist == "Unknown Artist":
             audio_performer = "TikTok Sound"
         
-        # Отправляем аудио
         await update.message.reply_audio(
             audio=audio_data,
             title=final_title[:100],
@@ -426,7 +372,6 @@ async def recognize_with_shazam(audio_data):
     try:
         print("🔍 Recognizing track with Shazam...")
         
-        # Ограничиваем размер аудио (первые 15 секунд)
         audio_sample = audio_data[:240000] if len(audio_data) > 240000 else audio_data
         
         async with aiohttp.ClientSession() as session:
@@ -545,7 +490,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработка сообщений с ссылками"""
     text = update.message.text
     
-    # Обработка кнопок меню
     if text in ["🎵 TikTok", "📺 YouTube", "📷 Instagram", "🐦 Twitter/X", "📘 Facebook", "📌 Pinterest"]:
         platform_info = {
             "🎵 TikTok": "Отправь мне ссылку на TikTok видео или фото.\nПример: https://vm.tiktok.com/...",
@@ -562,7 +506,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await help_command(update, context)
         return
     
-    # Определяем платформу по ссылке
     platform = detect_platform(text)
     
     if not platform:
@@ -591,7 +534,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif platform == 'youtube':
             url = extract_youtube_url(text)
             if url:
-                result = await download_youtube(url)
+                result = await asyncio.to_thread(download_youtube_sync, url)
         
         else:
             await status_msg.edit_text(f"⚠️ {platform.upper()} пока не поддерживается.\nСкоро добавим!")
@@ -607,7 +550,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         
-        # Обработка TikTok
+        if result.get("type") == "error":
+            await status_msg.edit_text(f"{result.get('message', '❌ Ошибка загрузки')}")
+            return
+        
         if platform == 'tiktok' and result["type"] == "video":
             await status_msg.edit_text("📥 Скачиваю видео...")
             
@@ -671,72 +617,44 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 print(f"❌ Video send error: {type(e).__name__} - {str(e)}")
                 await status_msg.edit_text(f"❌ Ошибка: {type(e).__name__}")
         
-        # Обработка YouTube
-        elif platform == 'youtube' and result["type"] == "video":
-            await status_msg.edit_text("📥 Скачиваю YouTube видео...")
+        elif platform == 'youtube' and result.get("type") == "video":
+            await status_msg.edit_text("📤 Отправляю YouTube видео...")
             
             try:
-                headers = {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                    'Referer': 'https://www.youtube.com/'
-                }
+                video_path = result["path"]
                 
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(
-                        result["url"],
-                        headers=headers,
-                        timeout=aiohttp.ClientTimeout(total=180)
-                    ) as resp:
-                        if resp.status in [200, 206]:
-                            video_data = bytearray()
-                            chunk_size = 1024 * 512
-                            
-                            downloaded = 0
-                            async for chunk in resp.content.iter_chunked(chunk_size):
-                                video_data.extend(chunk)
-                                downloaded += len(chunk)
-                                
-                                # Обновляем прогресс каждые 5MB
-                                if downloaded % (1024 * 1024 * 5) < chunk_size:
-                                    mb = downloaded / (1024 * 1024)
-                                    await status_msg.edit_text(f"📥 Скачано: {mb:.1f} MB...")
-                            
-                            video_bytes = bytes(video_data)
-                            size_mb = len(video_bytes) / (1024 * 1024)
-                            print(f"✅ YouTube video downloaded: {size_mb:.2f} MB")
-                            
-                            if size_mb > 50:
-                                await status_msg.edit_text(
-                                    f"❌ Видео слишком большое ({size_mb:.1f} MB)\n"
-                                    "Telegram поддерживает до 50 MB"
-                                )
-                                return
-                            
-                            await status_msg.edit_text("📤 Отправляю видео...")
-                            
-                            caption = f"✅ {result['title'][:150]}\n"
-                            if result.get('quality'):
-                                caption += f"📺 YouTube • {result['quality']}p • {size_mb:.1f} MB"
-                            else:
-                                caption += f"📺 YouTube • {size_mb:.1f} MB"
-                            
-                            await update.message.reply_video(
-                                video=video_bytes,
-                                caption=caption,
-                                filename="youtube_video.mp4",
-                                supports_streaming=True,
-                                read_timeout=180,
-                                write_timeout=180
-                            )
-                            await status_msg.delete()
-                            print("✅ YouTube video sent successfully")
-                        else:
-                            await status_msg.edit_text(f"❌ Ошибка загрузки (HTTP {resp.status})")
+                with open(video_path, 'rb') as video_file:
+                    video_bytes = video_file.read()
+                
+                caption = f"✅ {result['title'][:150]}\n"
+                caption += f"📺 YouTube • {result['size_mb']:.1f} MB"
+                if result.get('duration'):
+                    mins = result['duration'] // 60
+                    secs = result['duration'] % 60
+                    caption += f" • {mins}:{secs:02d}"
+                
+                await update.message.reply_video(
+                    video=video_bytes,
+                    caption=caption,
+                    filename="youtube_video.mp4",
+                    supports_streaming=True,
+                    read_timeout=180,
+                    write_timeout=180
+                )
+                
+                os.remove(video_path)
+                
+                await status_msg.delete()
+                print("✅ YouTube video sent successfully")
+                
             except Exception as e:
-                print(f"❌ YouTube error: {type(e).__name__} - {str(e)}")
-                await status_msg.edit_text(f"❌ Ошибка: {type(e).__name__}")
+                print(f"❌ YouTube send error: {type(e).__name__} - {str(e)}")
+                
+                if 'video_path' in locals() and os.path.exists(video_path):
+                    os.remove(video_path)
+                
+                await status_msg.edit_text(f"❌ Ошибка отправки: {type(e).__name__}")
         
-        # Обработка TikTok фото
         elif platform == 'tiktok' and result["type"] == "images":
             images_count = len(result["urls"])
             await status_msg.edit_text(f"📥 Скачиваю {images_count} фото...")
@@ -847,7 +765,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"📤 Отправлено: {sent_count} из {len(photos)}\n\n"
                     "Попробуй еще раз - обычно помогает!"
                 )
-    
+        else:
+            await status_msg.edit_text(f"❌ Неизвестный тип контента")
+                
     except Exception as e:
         error_msg = str(e)
         print(f"Handler error: {error_msg}")
@@ -863,7 +783,7 @@ def main():
         return
     
     print("🤖 Запускаю бота...")
-    print("📡 Используется TikWM API для скачивания")
+    print("📡 Поддержка платформ: TikTok, YouTube")
     
     app = Application.builder().token(BOT_TOKEN).build()
     
@@ -872,7 +792,7 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
     print("✅ Бот запущен и готов к работе!")
-    print("💡 Отправь боту ссылку на TikTok для теста")
+    print("💡 Отправь боту ссылку на TikTok или YouTube для теста")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
