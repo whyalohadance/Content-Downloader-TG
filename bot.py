@@ -8,30 +8,23 @@ import json
 from urllib.parse import quote, urlparse
 from pytubefix import YouTube
 from pytubefix.cli import on_progress
+import tempfile
 
 # Вставь сюда токен от @BotFather
 BOT_TOKEN = "8410013565:AAHNYF-9HE7z7KMKxqeI_ZuMjK-W84J_0Rs"
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда /start"""
-    # Создаём клавиатуру с платформами
     keyboard = [
         [KeyboardButton("🎵 TikTok"), KeyboardButton("📺 YouTube")],
-        [KeyboardButton("📷 Instagram"), KeyboardButton("🐦 Twitter/X")],
-        [KeyboardButton("📘 Facebook"), KeyboardButton("📌 Pinterest")],
         [KeyboardButton("ℹ️ Помощь")]
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     
     await update.message.reply_text(
-        "👋 Привет! Я универсальный бот для скачивания видео.\n\n"
-        "📱 Выбери платформу кнопками ниже или просто отправь ссылку:\n\n"
+        "👋 Привет! Я стабильный бот для скачивания видео.\n\n"
         "✅ TikTok - видео/фото без водяных знаков + музыка\n"
-        "✅ YouTube - видео в максимальном качестве\n"
-        "✅ Instagram - посты, reels, stories\n"
-        "✅ Twitter/X - видео из твитов\n"
-        "✅ Facebook - видео с Facebook\n"
-        "✅ Pinterest - видео и изображения\n\n"
+        "✅ YouTube - видео до 1080p (до 150 MB)\n\n"
         "Просто отправь мне ссылку!",
         reply_markup=reply_markup
     )
@@ -40,26 +33,22 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда /help"""
     keyboard = [
         [KeyboardButton("🎵 TikTok"), KeyboardButton("📺 YouTube")],
-        [KeyboardButton("📷 Instagram"), KeyboardButton("🐦 Twitter/X")],
-        [KeyboardButton("📘 Facebook"), KeyboardButton("📌 Pinterest")],
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     
     await update.message.reply_text(
-        "ℹ️ Как использовать бота:\n\n"
-        "1️⃣ Выбери платформу кнопками или просто отправь ссылку\n"
-        "2️⃣ Скопируй ссылку на видео из приложения\n"
-        "3️⃣ Отправь мне ссылку\n"
-        "4️⃣ Получи видео в максимальном качестве!\n\n"
+        "ℹ️ Как использовать:\n\n"
+        "Просто отправь ссылку на видео!\n\n"
         "🎵 TikTok:\n"
         "• Видео без водяного знака\n"
         "• Фото из слайдшоу группой\n"
-        "• Музыка с кнопками поиска в Spotify/YouTube\n\n"
+        "• Музыка с Shazam + кнопки поиска\n"
+        "• Оригинальное соотношение сторон\n\n"
         "📺 YouTube:\n"
-        "• Видео до 1080p (максимальное качество для Telegram)\n"
-        "• Без сжатия качества\n"
-        "• Быстрая загрузка\n\n"
-        "Остальные платформы скоро будут добавлены!",
+        "• Качество: до 1080p\n"
+        "• Длительность: до 30 минут\n"
+        "• Размер: до 150 MB\n"
+        "• Без сжатия качества",
         reply_markup=reply_markup
     )
 
@@ -91,6 +80,35 @@ def extract_youtube_url(text):
             return match.group(0)
     return None
 
+def extract_instagram_url(text):
+    """Извлекает ссылку Instagram из текста"""
+    patterns = [
+        r'https?://(?:www\.)?instagram\.com/stories/[\w.]+/\d+',
+        r'https?://(?:www\.)?instagram\.com/p/[\w-]+',
+        r'https?://(?:www\.)?instagram\.com/reel/[\w-]+',
+        r'https?://(?:www\.)?instagram\.com/[\w.]+',
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            return match.group(0)
+    return None
+
+def extract_pinterest_url(text):
+    """Извлекает ссылку Pinterest из текста"""
+    patterns = [
+        r'https?://(?:www\.)?pinterest\.com/pin/\d+',
+        r'https?://(?:www\.)?pinterest\.[a-z]+/pin/\d+',
+        r'https?://pin\.it/[\w]+',
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            return match.group(0)
+    return None
+
 def detect_platform(text):
     """Определяет платформу по ссылке"""
     text_lower = text.lower()
@@ -99,14 +117,6 @@ def detect_platform(text):
         return 'tiktok'
     elif 'youtube.com' in text_lower or 'youtu.be' in text_lower:
         return 'youtube'
-    elif 'instagram.com' in text_lower:
-        return 'instagram'
-    elif 'twitter.com' in text_lower or 'x.com' in text_lower:
-        return 'twitter'
-    elif 'facebook.com' in text_lower or 'fb.watch' in text_lower:
-        return 'facebook'
-    elif 'pinterest.com' in text_lower or 'pin.it' in text_lower:
-        return 'pinterest'
     
     return None
 
@@ -115,7 +125,6 @@ def download_youtube_sync(url):
     try:
         print(f"📺 YouTube URL: {url}")
         
-        # Создаем объект YouTube
         yt = YouTube(url, on_progress_callback=on_progress)
         
         title = yt.title
@@ -125,46 +134,68 @@ def download_youtube_sync(url):
         print(f"📺 Title: {title}")
         print(f"⏱ Duration: {duration}s ({duration // 60}m {duration % 60}s)")
         
-        # Проверяем длительность
-        if duration > 1200:  # 20 минут
+        if duration > 1800:  # 30 минут
             print(f"⚠️ Video too long: {duration}s")
             return {
                 "type": "error",
-                "message": f"❌ Видео слишком длинное: {duration // 60} мин {duration % 60} сек\n\nTelegram поддерживает до 20 минут"
+                "message": f"❌ Видео слишком длинное: {duration // 60} мин\n\n⏱ Максимум: 30 минут"
             }
         
-        # Получаем лучший поток с видео и аудио (progressive)
-        # Или отдельно видео и аудио если progressive недоступен
         print("⬇️ Downloading...")
         
-        # Пробуем progressive stream (видео+аудио в одном файле)
-        stream = yt.streams.filter(progressive=True, file_extension='mp4').order_by('resolution').desc().first()
+        # Получаем все progressive потоки (видео+аудио)
+        progressive_streams = yt.streams.filter(
+            progressive=True, 
+            file_extension='mp4'
+        ).order_by('resolution').desc()
+        
+        print(f"Available progressive streams:")
+        for s in progressive_streams:
+            print(f"  - {s.resolution} ({s.filesize / (1024*1024):.1f} MB)")
+        
+        # Выбираем лучшее качество, которое помещается в 150MB
+        stream = None
+        for s in progressive_streams:
+            size_mb = s.filesize / (1024 * 1024)
+            if size_mb <= 150:
+                stream = s
+                break
+        
+        # Если progressive нет или все слишком большие, пробуем adaptive
+        if not stream:
+            print("No suitable progressive stream, trying adaptive...")
+            adaptive_streams = yt.streams.filter(
+                adaptive=True,
+                file_extension='mp4',
+                only_video=False
+            ).order_by('resolution').desc()
+            
+            for s in adaptive_streams:
+                size_mb = s.filesize / (1024 * 1024)
+                if size_mb <= 150:
+                    stream = s
+                    break
         
         if not stream:
-            # Если progressive нет, берем только видео (без звука, но хорошее качество)
-            stream = yt.streams.filter(adaptive=True, file_extension='mp4', only_video=False).order_by('resolution').desc().first()
-        
-        if not stream:
-            print("❌ No suitable stream found")
             return {
                 "type": "error",
-                "message": "❌ Не удалось найти подходящий формат видео"
+                "message": "❌ Не удалось найти подходящий формат\n\nВозможно видео слишком большое даже в низком качестве"
             }
         
-        print(f"📥 Downloading: {stream.resolution} - {stream.filesize / (1024*1024):.1f} MB")
-        
-        # Проверяем размер до скачивания
+        resolution = stream.resolution or "Unknown"
         size_mb = stream.filesize / (1024 * 1024)
-        if size_mb > 45:
-            return {
-                "type": "error",
-                "message": f"❌ Видео слишком большое: {size_mb:.1f} MB\n\nTelegram поддерживает до 50 MB\n\n💡 Попробуй более короткое видео"
-            }
         
-        # Скачиваем
+        print(f"📥 Selected: {resolution} - {size_mb:.1f} MB")
+        
         video_path = stream.download(output_path='/tmp', filename=f'{video_id}.mp4')
         
-        print(f"✅ Downloaded: {size_mb:.2f} MB")
+        print(f"✅ Downloaded: {resolution} - {size_mb:.2f} MB at {video_path}")
+        
+        # Получаем реальные размеры видео из потока
+        width = getattr(stream, 'width', None)
+        height = getattr(stream, 'height', None)
+        
+        print(f"📐 Dimensions: {width}x{height}")
         
         return {
             "type": "video",
@@ -172,6 +203,9 @@ def download_youtube_sync(url):
             "title": title,
             "duration": duration,
             "size_mb": size_mb,
+            "resolution": resolution,
+            "width": width,
+            "height": height,
             "platform": "youtube"
         }
         
@@ -182,12 +216,230 @@ def download_youtube_sync(url):
         if "Video unavailable" in error_msg or "Private video" in error_msg:
             return {
                 "type": "error",
-                "message": "❌ Видео недоступно\n\nВозможные причины:\n• Видео приватное\n• Видео удалено\n• Географические ограничения"
+                "message": "❌ Видео недоступно\n\n• Видео приватное или удалено\n• Возрастные ограничения\n• Географические ограничения"
             }
         
         return {
             "type": "error",
-            "message": f"❌ Ошибка загрузки: {type(e).__name__}"
+            "message": f"❌ Ошибка загрузки"
+        }
+
+async def download_pinterest(url):
+    """Скачивает контент из Pinterest"""
+    try:
+        print(f"📌 Pinterest URL: {url}")
+        
+        # Разворачиваем короткую ссылку pin.it
+        if 'pin.it' in url:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, allow_redirects=True, timeout=aiohttp.ClientTimeout(total=10)) as response:
+                    url = str(response.url)
+                    print(f"Resolved to: {url}")
+        
+        # Извлекаем PIN ID
+        pin_match = re.search(r'/pin/(\d+)', url)
+        if not pin_match:
+            return {
+                "type": "error",
+                "message": "❌ Неправильная ссылка Pinterest"
+            }
+        
+        pin_id = pin_match.group(1)
+        print(f"📌 Pin ID: {pin_id}")
+        
+        # Используем публичный API Pinterest
+        api_url = f"https://www.pinterest.com/resource/PinResource/get/?data=%7B%22options%22%3A%7B%22field_set_key%22%3A%22unauth_react_main_pin%22%2C%22id%22%3A%22{pin_id}%22%7D%7D"
+        
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Accept': 'application/json',
+        }
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                api_url,
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=30)
+            ) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    
+                    resource_data = data.get('resource_response', {}).get('data', {})
+                    
+                    if not resource_data:
+                        return {
+                            "type": "error",
+                            "message": "❌ Не удалось получить данные пина"
+                        }
+                    
+                    title = resource_data.get('title', 'Pinterest')
+                    description = resource_data.get('description', '')
+                    caption = f"{title} - {description}"[:200] if description else title[:200]
+                    
+                    # Проверяем наличие видео
+                    videos = resource_data.get('videos')
+                    if videos and videos.get('video_list'):
+                        # Берем лучшее качество видео
+                        video_formats = videos['video_list']
+                        best_video = None
+                        max_width = 0
+                        
+                        for fmt_key, fmt_data in video_formats.items():
+                            if fmt_data.get('width', 0) > max_width:
+                                max_width = fmt_data['width']
+                                best_video = fmt_data
+                        
+                        if best_video:
+                            video_url = best_video['url']
+                            
+                            print(f"✅ Found video: {max_width}p")
+                            
+                            return {
+                                "type": "video",
+                                "url": video_url,
+                                "title": caption,
+                                "platform": "pinterest"
+                            }
+                    
+                    # Если нет видео, берем изображение
+                    images = resource_data.get('images')
+                    if images and images.get('orig'):
+                        image_url = images['orig']['url']
+                        
+                        print(f"✅ Found image")
+                        
+                        return {
+                            "type": "image_url",
+                            "url": image_url,
+                            "title": caption,
+                            "platform": "pinterest"
+                        }
+        
+        return {
+            "type": "error",
+            "message": "❌ Не удалось загрузить контент из Pinterest"
+        }
+        
+    except Exception as e:
+        print(f"Pinterest Error: {type(e).__name__} - {str(e)}")
+        return {
+            "type": "error",
+            "message": f"❌ Ошибка Pinterest: {type(e).__name__}"
+        }
+    """Скачивает контент из Instagram через публичный API"""
+    try:
+        print(f"📷 Instagram URL: {url}")
+        
+        # Используем публичный API для Instagram
+        # Альтернатива 1: DownloadGram API
+        api_url = "https://downloadgram.org/reel-downloader.php"
+        
+        # Извлекаем shortcode
+        shortcode = None
+        if '/stories/' in url:
+            return {
+                "type": "error",
+                "message": "❌ Stories недоступны\n\n💡 Попробуй:\n• Пост: instagram.com/p/ABC\n• Reel: instagram.com/reel/ABC"
+            }
+        
+        post_match = re.search(r'/(p|reel|reels)/([\w-]+)', url)
+        if post_match:
+            shortcode = post_match.group(2)
+        elif platform == 'instagram':
+            url = extract_instagram_url(text)
+            if url:
+                result = await download_instagram(url)
+        
+        else:
+            return {
+                "type": "error", 
+                "message": "❌ Неправильная ссылка"
+            }
+        
+        print(f"📷 Shortcode: {shortcode}")
+        
+        # Используем rapidapi instagram downloader
+        # Это бесплатный метод через scraping
+        
+        scrape_url = f"https://www.instagram.com/p/{shortcode}/?__a=1&__d=dis"
+        
+        headers = {
+            'User-Agent': 'Instagram 76.0.0.15.395 Android (24/7.0; 640dpi; 1440x2560; samsung; SM-G930F; herolte; samsungexynos8890; en_US)',
+            'Accept': '*/*',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'X-IG-App-ID': '936619743392459',
+        }
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                scrape_url,
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=30)
+            ) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    
+                    items = data.get('items', [])
+                    if not items:
+                        return {
+                            "type": "error",
+                            "message": "❌ Не удалось получить данные поста"
+                        }
+                    
+                    item = items[0]
+                    
+                    # Проверяем тип контента
+                    if item.get('video_versions'):
+                        # Это видео/reel
+                        video_url = item['video_versions'][0]['url']
+                        caption = item.get('caption', {}).get('text', 'Instagram Video')
+                        
+                        return {
+                            "type": "video",
+                            "url": video_url,
+                            "title": caption[:100],
+                            "platform": "instagram"
+                        }
+                    
+                    elif item.get('carousel_media'):
+                        # Несколько фото/видео
+                        media_urls = []
+                        for media in item['carousel_media']:
+                            if media.get('image_versions2'):
+                                media_urls.append(media['image_versions2']['candidates'][0]['url'])
+                        
+                        caption = item.get('caption', {}).get('text', 'Instagram Post')
+                        
+                        return {
+                            "type": "images_urls",
+                            "urls": media_urls,
+                            "title": caption[:100],
+                            "platform": "instagram"
+                        }
+                    
+                    elif item.get('image_versions2'):
+                        # Одно фото
+                        photo_url = item['image_versions2']['candidates'][0]['url']
+                        caption = item.get('caption', {}).get('text', 'Instagram Photo')
+                        
+                        return {
+                            "type": "image_url",
+                            "url": photo_url,
+                            "title": caption[:100],
+                            "platform": "instagram"
+                        }
+        
+        # Если не сработало, возвращаем ошибку
+        return {
+            "type": "error",
+            "message": "❌ Instagram временно недоступен\n\n💡 Возможные причины:\n• IP адрес заблокирован Instagram\n• Приватный аккаунт\n• Пост удалён\n\n⏳ Попробуй через 10-15 минут"
+        }
+        
+    except Exception as e:
+        print(f"Instagram Error: {type(e).__name__} - {str(e)}")
+        return {
+            "type": "error",
+            "message": "❌ Instagram временно недоступен\n\n⏳ Попробуй через несколько минут"
         }
 
 async def send_music(update: Update, result: dict):
@@ -492,9 +744,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if text in ["🎵 TikTok", "📺 YouTube", "📷 Instagram", "🐦 Twitter/X", "📘 Facebook", "📌 Pinterest"]:
         platform_info = {
-            "🎵 TikTok": "Отправь мне ссылку на TikTok видео или фото.\nПример: https://vm.tiktok.com/...",
-            "📺 YouTube": "Отправь мне ссылку на YouTube видео.\nПример: https://youtube.com/watch?v=...",
-            "📷 Instagram": "⚠️ Instagram скоро будет доступен!",
+            "🎵 TikTok": "Отправь мне ссылку на TikTok видео или фото.\n\nПример:\nhttps://vm.tiktok.com/...\nhttps://www.tiktok.com/@user/video/...",
+            "📺 YouTube": "Отправь мне ссылку на YouTube видео.\n\n⏱ Ограничение: до 20 минут\n💾 Размер: до 45 MB\n🎬 Качество: до 1080p\n\nПример:\nhttps://youtube.com/watch?v=...\nhttps://youtu.be/...",
+            "📷 Instagram": "Отправь мне ссылку на Instagram пост или Reel.\n\nПример:\n• Пост: instagram.com/p/ABC123\n• Reel: instagram.com/reel/ABC123\n\n💡 Только публичные аккаунты",
             "🐦 Twitter/X": "⚠️ Twitter/X скоро будет доступен!",
             "📘 Facebook": "⚠️ Facebook скоро будет доступен!",
             "📌 Pinterest": "⚠️ Pinterest скоро будет доступен!"
@@ -510,14 +762,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if not platform:
         await update.message.reply_text(
-            "❌ Не могу определить платформу.\n\n"
+            "❌ Не могу определить платформу\n\n"
             "Поддерживаются:\n"
-            "• TikTok (vm.tiktok.com, www.tiktok.com)\n"
-            "• YouTube (youtube.com, youtu.be)\n"
-            "• Instagram (скоро)\n"
-            "• Twitter/X (скоро)\n"
-            "• Facebook (скоро)\n"
-            "• Pinterest (скоро)"
+            "🎵 TikTok - vm.tiktok.com, www.tiktok.com\n"
+            "📺 YouTube - youtube.com, youtu.be"
         )
         return
     
@@ -597,15 +845,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             caption += f"👤 {result.get('author', 'Unknown')}\n"
                             caption += f"🎬 TikTok • {size_mb:.1f} MB"
                             
+                            # Не указываем width и height - Telegram сам определит правильное соотношение
                             await update.message.reply_video(
                                 video=video_bytes,
                                 caption=caption,
                                 filename="tiktok_video.mp4",
                                 supports_streaming=True,
                                 read_timeout=120,
-                                write_timeout=120,
-                                width=720,
-                                height=1280
+                                write_timeout=120
                             )
                             await status_msg.delete()
                             print("✅ Video sent successfully")
@@ -783,7 +1030,7 @@ def main():
         return
     
     print("🤖 Запускаю бота...")
-    print("📡 Поддержка платформ: TikTok, YouTube")
+    print("📡 TikTok (видео/фото/музыка) | YouTube (1080p, 30 мин, 150MB)")
     
     app = Application.builder().token(BOT_TOKEN).build()
     
