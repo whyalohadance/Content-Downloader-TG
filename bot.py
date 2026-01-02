@@ -13,6 +13,9 @@ import tempfile
 # Вставь сюда токен от @BotFather
 BOT_TOKEN = "8410013565:AAHNYF-9HE7z7KMKxqeI_ZuMjK-W84J_0Rs"
 
+# Временное хранилище для выбора качества YouTube
+user_quality_choice = {}
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда /start"""
     keyboard = [
@@ -22,9 +25,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     
     await update.message.reply_text(
-        "👋 Привет! Я стабильный бот для скачивания видео.\n\n"
+        "👋 Привет! Я бот для скачивания видео.\n\n"
         "✅ TikTok - видео/фото без водяных знаков + музыка\n"
-        "✅ YouTube - видео до 1080p (до 150 MB)\n\n"
+        "✅ YouTube - качество зависит от длины видео\n\n"
+        "📊 YouTube лимиты:\n"
+        "• Короткие видео (до 5 мин): 1080p/720p\n"
+        "• Средние (5-15 мин): 720p/480p\n"
+        "• Длинные (15-30 мин): 480p/360p\n"
+        "• Лимит Telegram: 50 MB на файл\n\n"
         "Просто отправь мне ссылку!",
         reply_markup=reply_markup
     )
@@ -45,10 +53,12 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Музыка с Shazam + кнопки поиска\n"
         "• Оригинальное соотношение сторон\n\n"
         "📺 YouTube:\n"
-        "• Качество: до 1080p\n"
-        "• Длительность: до 30 минут\n"
-        "• Размер: до 150 MB\n"
-        "• Без сжатия качества",
+        "• Качество: зависит от длины видео\n"
+        "  - Короткие (до 5 мин): до 1080p\n"
+        "  - Средние (5-15 мин): до 720p\n"
+        "  - Длинные (15-30 мин): до 480p\n"
+        "• Лимит Telegram: 50 MB\n"
+        "• Максимум: 30 минут",
         reply_markup=reply_markup
     )
 
@@ -119,6 +129,204 @@ def detect_platform(text):
         return 'youtube'
     
     return None
+
+def get_youtube_streams(url):
+    """Получает список доступных потоков YouTube"""
+    try:
+        yt = YouTube(url)
+        
+        # Получаем adaptive видео потоки (без аудио, но высокое качество)
+        video_streams = yt.streams.filter(
+            adaptive=True,
+            file_extension='mp4',
+            only_video=True
+        ).order_by('resolution').desc()
+        
+        # Получаем лучший аудио поток
+        audio_stream = yt.streams.filter(
+            only_audio=True,
+            file_extension='mp4'
+        ).order_by('abr').desc().first()
+        
+        audio_size = audio_stream.filesize / (1024 * 1024) if audio_stream else 0
+        
+        result = []
+        seen_resolutions = set()
+        
+        for stream in video_streams:
+            # Получаем высоту видео (для портретных и горизонтальных)
+            height = stream.resolution.replace('p', '') if stream.resolution else '0'
+            
+            try:
+                height_int = int(height)
+            except:
+                continue
+            
+            # Ограничиваем максимум до 1080p (по высоте)
+            if height_int > 1080:
+                continue
+            
+            # Пропускаем дубликаты разрешений
+            resolution_key = f"{stream.width}x{stream.height}"
+            if resolution_key in seen_resolutions:
+                continue
+            
+            video_size = stream.filesize / (1024 * 1024)
+            total_size = video_size + audio_size
+            
+            # После re-encoding размер уменьшится примерно на 15-25%
+            # Поэтому используем более щедрый лимит при фильтрации
+            estimated_final_size = total_size * 0.80  # Предполагаем 20% сжатие
+            
+            # Telegram bot API limit is 50MB
+            # Разрешаем потоки до 60MB, т.к. после re-encoding они станут ~48MB
+            if total_size <= 60:
+                result.append({
+                    'itag': stream.itag,
+                    'resolution': stream.resolution,
+                    'fps': stream.fps,
+                    'size_mb': round(estimated_final_size, 1),  # Показываем примерный размер после сжатия
+                    'raw_size_mb': total_size,  # Храним реальный размер для логов
+                    'width': stream.width,
+                    'height': stream.height,
+                    'audio_itag': audio_stream.itag if audio_stream else None
+                })
+                seen_resolutions.add(resolution_key)
+        
+        # Сортируем по высоте (для правильного отображения портретных и горизонтальных)
+        result.sort(key=lambda x: x['height'], reverse=True)
+        
+        print(f"📊 Available streams for {yt.video_id}:")
+        for s in result:
+            print(f"   {s['resolution']} ({s['width']}x{s['height']}) - Raw: {s['raw_size_mb']:.1f} MB → Estimated: {s['size_mb']:.1f} MB")
+        
+        return {
+            'title': yt.title,
+            'duration': yt.length,
+            'video_id': yt.video_id,
+            'streams': result
+        }
+    except Exception as e:
+        print(f"Error getting streams: {e}")
+        return None
+
+def download_youtube_with_quality(url, itag, audio_itag=None):
+    """Скачивает YouTube с конкретным качеством и объединяет видео с аудио"""
+    try:
+        print(f"📺 Downloading YouTube with video itag={itag}, audio itag={audio_itag}")
+        
+        yt = YouTube(url, on_progress_callback=on_progress)
+        video_stream = yt.streams.get_by_itag(itag)
+        
+        if not video_stream:
+            return None
+        
+        video_id = yt.video_id
+        
+        # Скачиваем видео
+        print(f"📥 Downloading video: {video_stream.resolution} ({video_stream.width}x{video_stream.height})")
+        video_path = video_stream.download(output_path='/tmp', filename=f'{video_id}_video.mp4')
+        
+        # Если есть отдельное аудио, скачиваем и объединяем
+        if audio_itag:
+            audio_stream = yt.streams.get_by_itag(audio_itag)
+            if audio_stream:
+                print(f"📥 Downloading audio...")
+                audio_path = audio_stream.download(output_path='/tmp', filename=f'{video_id}_audio.mp4')
+                
+                # Объединяем видео и аудио с помощью ffmpeg
+                output_path = f'/tmp/{video_id}_final.mp4'
+                
+                print(f"🔧 Merging video and audio with ffmpeg...")
+                import subprocess
+                
+                # ВАЖНО: Перекодируем видео в H.264 для совместимости с Telegram
+                # Используем libx264 вместо copy для гарантии работы видео
+                result = subprocess.run([
+                    'ffmpeg', '-i', video_path, '-i', audio_path,
+                    '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
+                    '-c:a', 'aac', '-b:a', '128k',
+                    '-pix_fmt', 'yuv420p',  # Формат пикселей для совместимости
+                    '-movflags', '+faststart',
+                    output_path, '-y', '-loglevel', 'error'
+                ], capture_output=True, text=True)
+                
+                if result.returncode != 0:
+                    print(f"⚠️ ffmpeg error: {result.stderr}")
+                    # Если ffmpeg не сработал, пробуем без перекодирования
+                    result2 = subprocess.run([
+                        'ffmpeg', '-i', video_path, '-i', audio_path,
+                        '-c:v', 'copy', '-c:a', 'aac', '-b:a', '128k',
+                        '-movflags', '+faststart',
+                        output_path, '-y', '-loglevel', 'error'
+                    ], capture_output=True, text=True)
+                    
+                    if result2.returncode != 0:
+                        print(f"⚠️ Second attempt failed, using video only")
+                        final_path = video_path
+                        if os.path.exists(audio_path):
+                            os.remove(audio_path)
+                    else:
+                        print(f"✅ Merged with copy codec")
+                        os.remove(video_path)
+                        os.remove(audio_path)
+                        final_path = output_path
+                else:
+                    print(f"✅ Merged and re-encoded successfully")
+                    # Удаляем временные файлы
+                    os.remove(video_path)
+                    os.remove(audio_path)
+                    final_path = output_path
+            else:
+                final_path = video_path
+        else:
+            final_path = video_path
+        
+        # Получаем размер финального файла
+        file_size_mb = os.path.getsize(final_path) / (1024 * 1024)
+        
+        print(f"✅ Final file: {file_size_mb:.1f} MB at {final_path}")
+        
+        # Telegram bot API limit is 50MB
+        if file_size_mb > 50:
+            print(f"⚠️ File too large ({file_size_mb:.1f} MB), compressing...")
+            compressed_path = f'/tmp/{video_id}_compressed.mp4'
+            
+            # Сжимаем видео до 45MB
+            import subprocess
+            result = subprocess.run([
+                'ffmpeg', '-i', final_path,
+                '-c:v', 'libx264', '-preset', 'fast', '-crf', '28',
+                '-c:a', 'aac', '-b:a', '96k',
+                '-pix_fmt', 'yuv420p',
+                '-movflags', '+faststart',
+                '-fs', '45M',  # Limit file size to 45MB
+                compressed_path, '-y', '-loglevel', 'error'
+            ], capture_output=True, text=True)
+            
+            if result.returncode == 0 and os.path.exists(compressed_path):
+                os.remove(final_path)
+                final_path = compressed_path
+                file_size_mb = os.path.getsize(final_path) / (1024 * 1024)
+                print(f"✅ Compressed to: {file_size_mb:.1f} MB")
+            else:
+                print(f"⚠️ Compression failed: {result.stderr}")
+                return None
+        
+        return {
+            "type": "video",
+            "path": final_path,
+            "title": yt.title,
+            "duration": yt.length,
+            "size_mb": file_size_mb,
+            "resolution": video_stream.resolution,
+            "width": video_stream.width,
+            "height": video_stream.height,
+            "platform": "youtube"
+        }
+    except Exception as e:
+        print(f"Download error: {e}")
+        return None
 
 def download_youtube_sync(url):
     """Синхронная функция для скачивания YouTube через pytubefix"""
@@ -325,121 +533,6 @@ async def download_pinterest(url):
         return {
             "type": "error",
             "message": f"❌ Ошибка Pinterest: {type(e).__name__}"
-        }
-    """Скачивает контент из Instagram через публичный API"""
-    try:
-        print(f"📷 Instagram URL: {url}")
-        
-        # Используем публичный API для Instagram
-        # Альтернатива 1: DownloadGram API
-        api_url = "https://downloadgram.org/reel-downloader.php"
-        
-        # Извлекаем shortcode
-        shortcode = None
-        if '/stories/' in url:
-            return {
-                "type": "error",
-                "message": "❌ Stories недоступны\n\n💡 Попробуй:\n• Пост: instagram.com/p/ABC\n• Reel: instagram.com/reel/ABC"
-            }
-        
-        post_match = re.search(r'/(p|reel|reels)/([\w-]+)', url)
-        if post_match:
-            shortcode = post_match.group(2)
-        elif platform == 'instagram':
-            url = extract_instagram_url(text)
-            if url:
-                result = await download_instagram(url)
-        
-        else:
-            return {
-                "type": "error", 
-                "message": "❌ Неправильная ссылка"
-            }
-        
-        print(f"📷 Shortcode: {shortcode}")
-        
-        # Используем rapidapi instagram downloader
-        # Это бесплатный метод через scraping
-        
-        scrape_url = f"https://www.instagram.com/p/{shortcode}/?__a=1&__d=dis"
-        
-        headers = {
-            'User-Agent': 'Instagram 76.0.0.15.395 Android (24/7.0; 640dpi; 1440x2560; samsung; SM-G930F; herolte; samsungexynos8890; en_US)',
-            'Accept': '*/*',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'X-IG-App-ID': '936619743392459',
-        }
-        
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                scrape_url,
-                headers=headers,
-                timeout=aiohttp.ClientTimeout(total=30)
-            ) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    
-                    items = data.get('items', [])
-                    if not items:
-                        return {
-                            "type": "error",
-                            "message": "❌ Не удалось получить данные поста"
-                        }
-                    
-                    item = items[0]
-                    
-                    # Проверяем тип контента
-                    if item.get('video_versions'):
-                        # Это видео/reel
-                        video_url = item['video_versions'][0]['url']
-                        caption = item.get('caption', {}).get('text', 'Instagram Video')
-                        
-                        return {
-                            "type": "video",
-                            "url": video_url,
-                            "title": caption[:100],
-                            "platform": "instagram"
-                        }
-                    
-                    elif item.get('carousel_media'):
-                        # Несколько фото/видео
-                        media_urls = []
-                        for media in item['carousel_media']:
-                            if media.get('image_versions2'):
-                                media_urls.append(media['image_versions2']['candidates'][0]['url'])
-                        
-                        caption = item.get('caption', {}).get('text', 'Instagram Post')
-                        
-                        return {
-                            "type": "images_urls",
-                            "urls": media_urls,
-                            "title": caption[:100],
-                            "platform": "instagram"
-                        }
-                    
-                    elif item.get('image_versions2'):
-                        # Одно фото
-                        photo_url = item['image_versions2']['candidates'][0]['url']
-                        caption = item.get('caption', {}).get('text', 'Instagram Photo')
-                        
-                        return {
-                            "type": "image_url",
-                            "url": photo_url,
-                            "title": caption[:100],
-                            "platform": "instagram"
-                        }
-        
-        # Если не сработало, возвращаем ошибку
-        return {
-            "type": "error",
-            "message": "❌ Instagram временно недоступен\n\n💡 Возможные причины:\n• IP адрес заблокирован Instagram\n• Приватный аккаунт\n• Пост удалён\n\n⏳ Попробуй через 10-15 минут"
-        }
-        
-    except Exception as e:
-        print(f"Instagram Error: {type(e).__name__} - {str(e)}")
-        return {
-            "type": "error",
-            "message": "❌ Instagram временно недоступен\n\n⏳ Попробуй через несколько минут"
         }
 
 async def send_music(update: Update, result: dict):
@@ -738,14 +831,120 @@ async def download_tiktok(url):
     
     return None
 
+async def handle_quality_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка выбора качества через callback"""
+    query = update.callback_query
+    await query.answer()
+    
+    data = query.data
+    user_id = query.from_user.id
+    
+    if data.startswith('yt_quality_'):
+        # Формат: yt_quality_ITAG_AUDIITAG_VIDEOID (audio_itag может быть None)
+        parts = data.split('_')
+        itag = int(parts[2])
+        audio_itag = int(parts[3]) if parts[3] != 'None' else None
+        video_id = parts[4]
+        
+        # Получаем сохранённый URL
+        url = user_quality_choice.get(user_id, {}).get('url')
+        
+        if not url:
+            await query.edit_message_text("❌ Ссылка устарела. Отправь ссылку заново.")
+            return
+        
+        status_msg = await query.edit_message_text("⏳ Скачиваю выбранное качество...")
+        
+        try:
+            # Скачиваем с выбранным качеством
+            result = await asyncio.to_thread(download_youtube_with_quality, url, itag, audio_itag)
+            
+            if not result:
+                await status_msg.edit_text("❌ Не удалось скачать")
+                return
+            
+            # Проверяем размер перед отправкой
+            if result["size_mb"] > 50:
+                await status_msg.edit_text(
+                    f"❌ Видео слишком большое ({result['size_mb']:.1f} MB)\n\n"
+                    f"📊 Telegram bot API limit: 50 MB\n"
+                    f"💡 Попробуй выбрать качество пониже"
+                )
+                # Удаляем файл
+                if os.path.exists(result["path"]):
+                    os.remove(result["path"])
+                return
+            
+            await status_msg.edit_text("📤 Отправляю видео...")
+            
+            video_path = result["path"]
+            
+            with open(video_path, 'rb') as video_file:
+                video_bytes = video_file.read()
+            
+            mins = result['duration'] // 60
+            secs = result['duration'] % 60
+            
+            caption = f"✅ {result['title'][:150]}\n"
+            caption += f"📺 YouTube • {result['resolution']} • {result['size_mb']:.1f} MB • {mins}:{secs:02d}"
+            
+            print(f"📤 Sending: {result['width']}x{result['height']}")
+            
+            await query.message.reply_video(
+                video=video_bytes,
+                caption=caption,
+                filename="youtube_video.mp4",
+                supports_streaming=True,
+                width=result['width'],
+                height=result['height'],
+                read_timeout=300,
+                write_timeout=300,
+                connect_timeout=60,
+                pool_timeout=60
+            )
+            
+            os.remove(video_path)
+            await status_msg.delete()
+            
+            # Очищаем выбор
+            if user_id in user_quality_choice:
+                del user_quality_choice[user_id]
+            
+            print("✅ YouTube video sent successfully")
+            
+        except Exception as e:
+            print(f"❌ Error: {type(e).__name__} - {str(e)}")
+            error_msg = str(e)
+            
+            # Более понятные сообщения об ошибках
+            if "Request Entity Too Large" in error_msg or "File too large" in error_msg:
+                await status_msg.edit_text(
+                    f"❌ Файл слишком большой для Telegram\n\n"
+                    f"📊 Лимит: 50 MB\n"
+                    f"💡 Выбери качество пониже"
+                )
+            elif "NetworkError" in error_msg or "TimedOut" in error_msg:
+                await status_msg.edit_text(
+                    f"❌ Ошибка сети при отправке\n\n"
+                    f"💡 Попробуй еще раз или выбери качество пониже"
+                )
+            else:
+                await status_msg.edit_text(f"❌ Ошибка: {type(e).__name__}")
+            
+            # Удаляем файл если есть
+            if 'result' in locals() and result and os.path.exists(result.get("path", "")):
+                os.remove(result["path"])
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработка сообщений с ссылками"""
     text = update.message.text
+    user_id = update.message.from_user.id
     
     if text in ["🎵 TikTok", "📺 YouTube", "📷 Instagram", "🐦 Twitter/X", "📘 Facebook", "📌 Pinterest"]:
         platform_info = {
-            "🎵 TikTok": "Отправь мне ссылку на TikTok видео или фото.\n\nПример:\nhttps://vm.tiktok.com/...\nhttps://www.tiktok.com/@user/video/...",
-            "📺 YouTube": "Отправь мне ссылку на YouTube видео.\n\n⏱ Ограничение: до 20 минут\n💾 Размер: до 45 MB\n🎬 Качество: до 1080p\n\nПример:\nhttps://youtube.com/watch?v=...\nhttps://youtu.be/...",
+            "🎵 TikTok": "Отправь мне ссылку на TikTok видео или фото.\n\n✅ Без водяных знаков\n✅ Оригинальное качество\n✅ Музыка с распознаванием\n\nПример:\nhttps://vm.tiktok.com/...\nhttps://www.tiktok.com/@user/video/...",
+            "📺 YouTube": "Отправь мне ссылку на YouTube видео.\n\n📊 Ограничения:\n• Длительность: до 30 минут\n• Размер файла: до 50 MB (лимит Telegram)\n• Качество: зависит от длины\n  - Короткие (до 5 мин): 1080p\n  - Средние (5-15 мин): 720p\n  - Длинные (15-30 мин): 480p\n\nПример:\nhttps://youtube.com/watch?v=...\nhttps://youtu.be/...",
             "📷 Instagram": "Отправь мне ссылку на Instagram пост или Reel.\n\nПример:\n• Пост: instagram.com/p/ABC123\n• Reel: instagram.com/reel/ABC123\n\n💡 Только публичные аккаунты",
             "🐦 Twitter/X": "⚠️ Twitter/X скоро будет доступен!",
             "📘 Facebook": "⚠️ Facebook скоро будет доступен!",
@@ -782,7 +981,56 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif platform == 'youtube':
             url = extract_youtube_url(text)
             if url:
-                result = await asyncio.to_thread(download_youtube_sync, url)
+                # Получаем доступные качества
+                await status_msg.edit_text("⏳ Анализирую видео...")
+                
+                streams_data = await asyncio.to_thread(get_youtube_streams, url)
+                
+                if not streams_data or not streams_data['streams']:
+                    await status_msg.edit_text(
+                        "❌ Нет доступных качеств для скачивания\n\n"
+                        "Возможные причины:\n"
+                        "• Видео слишком длинное для любого качества\n"
+                        "• Все версии превышают 50 MB (лимит Telegram)\n"
+                        "• Видео недоступно или ограничено\n\n"
+                        "💡 Попробуй более короткое видео (до 10 минут)"
+                    )
+                    return
+                
+                # Проверяем длительность
+                if streams_data['duration'] > 1800:
+                    await status_msg.edit_text(
+                        f"❌ Видео слишком длинное: {streams_data['duration'] // 60} мин\n\n⏱ Максимум: 30 минут"
+                    )
+                    return
+                
+                # Сохраняем URL для пользователя
+                user_quality_choice[user_id] = {
+                    'url': url,
+                    'video_id': streams_data['video_id']
+                }
+                
+                # Создаём кнопки с качествами
+                keyboard = []
+                for stream in streams_data['streams']:
+                    button_text = f"{stream['resolution']} • {stream['width']}x{stream['height']} • {stream['size_mb']:.1f} MB"
+                    audio_itag_str = str(stream['audio_itag']) if stream.get('audio_itag') else 'None'
+                    callback_data = f"yt_quality_{stream['itag']}_{audio_itag_str}_{streams_data['video_id']}"
+                    keyboard.append([InlineKeyboardButton(button_text, callback_data=callback_data)])
+                
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                
+                mins = streams_data['duration'] // 60
+                secs = streams_data['duration'] % 60
+                
+                await status_msg.edit_text(
+                    f"📺 {streams_data['title'][:100]}\n"
+                    f"⏱ Длительность: {mins}:{secs:02d}\n\n"
+                    f"🎬 Выбери качество:\n"
+                    f"💡 Чем выше качество, тем больше размер файла",
+                    reply_markup=reply_markup
+                )
+                return  # Выходим, ждём выбора качества
         
         else:
             await status_msg.edit_text(f"⚠️ {platform.upper()} пока не поддерживается.\nСкоро добавим!")
@@ -845,7 +1093,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             caption += f"👤 {result.get('author', 'Unknown')}\n"
                             caption += f"🎬 TikTok • {size_mb:.1f} MB"
                             
-                            # Не указываем width и height - Telegram сам определит правильное соотношение
                             await update.message.reply_video(
                                 video=video_bytes,
                                 caption=caption,
@@ -1030,13 +1277,19 @@ def main():
         return
     
     print("🤖 Запускаю бота...")
-    print("📡 TikTok (видео/фото/музыка) | YouTube (1080p, 30 мин, 150MB)")
+    print("📡 TikTok (без водяных знаков) | YouTube (качество зависит от длины)")
+    print("⚠️ Telegram bot API limit: 50 MB per file")
+    print("📊 YouTube quality guide:")
+    print("   • Short videos (< 5 min): up to 1080p")
+    print("   • Medium videos (5-15 min): up to 720p")
+    print("   • Long videos (15-30 min): up to 480p")
     
     app = Application.builder().token(BOT_TOKEN).build()
     
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(CallbackQueryHandler(handle_quality_selection))
     
     print("✅ Бот запущен и готов к работе!")
     print("💡 Отправь боту ссылку на TikTok или YouTube для теста")
